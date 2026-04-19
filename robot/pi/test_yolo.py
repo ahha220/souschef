@@ -1,155 +1,137 @@
 from flask import Flask, Response
 import cv2
-from ultralytics import YOLO
+import numpy as np
 
 app = Flask(__name__)
 
-# =========================
-# 🤖 YOLO MODEL
-# =========================
-model = YOLO("yolov8n.pt")
-
 cap = cv2.VideoCapture(0)
-
-# 🔥 LOWER RESOLUTION (speed boost)
 cap.set(3, 320)
 cap.set(4, 240)
 
-frame_id = 0
+FLIP_MODE = 1
 
-# =========================
-# 📷 CAMERA ORIENTATION FIX
-# =========================
-FLIP_MODE = 1   # 1 = mirror (most common)
-                # 0 = upside down
-                # -1 = both
+def draw_target(frame, center, color, label):
+    if center is None:
+        return frame
 
-# =========================
-# 🍅 TOMATO DETECTION (FAST CV)
-# =========================
+    cx, cy = center
+    cv2.circle(frame, (cx, cy), 6, color, -1)
+    cv2.putText(frame, label, (cx + 6, cy),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+    return frame
+
+
 def detect_tomato(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hue, sat, val = cv2.split(hsv)
 
-    lower_red1 = (0, 120, 70)
-    upper_red1 = (10, 255, 255)
+    # tighter red hue
+    red_mask = (
+        cv2.inRange(hue, 0, 10) |
+        cv2.inRange(hue, 170, 180)
+    )
 
-    lower_red2 = (170, 120, 70)
-    upper_red2 = (180, 255, 255)
+    # less sensitive to dark/shadow red
+    sat_mask = cv2.inRange(sat, 90, 255)
+    val_mask = cv2.inRange(val, 70, 255)
 
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    mask = red_mask & sat_mask & val_mask
 
-    mask = mask1 + mask2
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                            np.ones((5,5), np.uint8))
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for c in contours:
+        area = cv2.contourArea(c)
 
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-
-        if area < 2000:
+        # reject far tomato & noise
+        if area < 1200:
             continue
 
-        x, y, w, h = cv2.boundingRect(cnt)
+        x,y,w,h = cv2.boundingRect(c)
+        aspect = w / (h + 1e-5)
 
-        cx = x + w // 2
-        cy = y + h // 2
+        if not (0.7 < aspect < 1.3):
+            continue
 
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
-        cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
+        # circularity check
+        peri = cv2.arcLength(c, True)
+        circularity = 4 * np.pi * area / (peri * peri + 1e-5)
 
-        cv2.putText(frame, "TOMATO", (x, y - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6, (0, 0, 255), 2)
+        if circularity < 0.6:
+            continue
 
-        return frame, (cx, cy)
+        cx, cy = x + w//2, y + h//2
+        cv2.rectangle(frame, (x,y), (x+w,y+h), (0,0,255), 2)
+        draw_target(frame, (cx,cy), (0,0,255), "TOMATO")
+
+        return frame, (cx,cy)
+
+    return frame, None
+
+def detect_blue_plate(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    h,s,v = cv2.split(hsv)
+
+    blue_mask = cv2.inRange(h, 85, 135)
+    sat_mask = cv2.inRange(s, 25, 200)
+    val_mask = cv2.inRange(v, 60, 255)
+
+    mask = blue_mask & sat_mask & val_mask
+
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                            np.ones((7,7), np.uint8))
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < 2500:
+            continue
+
+        x,y,w,h = cv2.boundingRect(c)
+        aspect = w / (h + 1e-5)
+
+        if not (0.7 < aspect < 1.3):
+            continue
+
+        mean_sat = np.mean(s[y:y+h, x:x+w])
+        if mean_sat < 30:
+            continue
+
+        cx, cy = x + w//2, y + h//2
+        cv2.rectangle(frame, (x,y), (x+w,y+h), (255,0,0), 2)
+        draw_target(frame, (cx,cy), (255,0,0), "PLATE")
+
+        return frame, (cx,cy)
 
     return frame, None
 
 
-# =========================
-# 🌐 STREAM FUNCTION
-# =========================
 def stream():
-    global frame_id
-
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        # =========================
-        # 📷 FIX CAMERA ORIENTATION
-        # =========================
         frame = cv2.flip(frame, FLIP_MODE)
 
-        frame_id += 1
+        frame, _ = detect_tomato(frame)
+        frame, _ = detect_blue_plate(frame)
 
-        # =========================
-        # 🍅 TOMATO DETECTION (FAST EVERY FRAME)
-        # =========================
-        frame, tomato_center = detect_tomato(frame)
-
-        if tomato_center:
-            cx, cy = tomato_center
-            # robot use later:
-            # error_x = cx - 160
-
-        # =========================
-        # 🤖 YOLO (SLOW EVERY 8 FRAMES)
-        # =========================
-        if frame_id % 8 == 0:
-            results = model(frame, imgsz=160, conf=0.4, verbose=False)
-
-            for box in results[0].boxes:
-                cls_id = int(box.cls[0])
-                name = model.names[cls_id]
-
-                if name not in ["knife", "bowl"]:
-                    continue
-
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-                cx = (x1 + x2) // 2
-                cy = (y1 + y2) // 2
-
-                cv2.circle(frame, (cx, cy), 4, (0, 255, 255), -1)
-
-                cv2.putText(frame, name, (x1, y1 - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5, (0, 255, 0), 2)
-
-        # =========================
-        # 📊 CENTER GUIDE (ROBOT ALIGNMENT)
-        # =========================
-        h, w = frame.shape[:2]
-        cv2.line(frame, (w//2, 0), (w//2, h), (255, 255, 0), 1)
-        cv2.line(frame, (0, h//2), (w, h//2), (255, 255, 0), 1)
-
-        # =========================
-        # 📡 STREAM OUTPUT
-        # =========================
         _, buffer = cv2.imencode('.jpg', frame,
                                  [cv2.IMWRITE_JPEG_QUALITY, 60])
 
-        frame = buffer.tobytes()
-
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' +
+               buffer.tobytes() + b'\r\n')
 
-
-# =========================
-# 🌐 FLASK ROUTE
-# =========================
 @app.route('/video')
 def video():
     return Response(stream(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
-
 
 app.run(host='0.0.0.0', port=5000)
