@@ -1,0 +1,9 @@
+node_modules/
+.next/
+__pycache__/
+.venv/
+*.db
+
+# Secrets — do not commit (backend keys, Knot, K2, etc.)
+.env
+backend/.env

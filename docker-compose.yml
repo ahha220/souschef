@@ -1,0 +1,14 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_PATH=/data/souschef.db
+    volumes:
+      - souschef_data:/data
+
+volumes:
+  souschef_data:
